@@ -1,32 +1,27 @@
 import cmd
-import crc_bruteforce
-import can
-from can import Message
-import lz4.block
 import math
-from tqdm import tqdm
 import struct
-import time
-import pigpio
 import subprocess
+import sys
+import time
+
+import can
+import lz4.block
+import pigpio
+from can import Message
+from tqdm import tqdm
 from udsoncan.connections import IsoTPSocketConnection
-import socket
 
+import crc_bruteforce
 
-TWISTER_PATH = (
-    "../Simos18_SBOOT/twister"
-)  # This is the path to the "twister" binary from https://github.com/bri3d/Simos18_SBOOT
+TWISTER_PATH = "../Simos18_SBOOT/twister"  # This is the path to the "twister" binary from https://github.com/bri3d/Simos18_SBOOT
 
 # Configurable parameters:
 
 # For a Pi 3B+, 0.0005 seems right. For a Pi 4, 0.0008 has been observed to work correctly (presumably latency between sleep and GPIO is lower).
-CRC_DELAY = (
-    0.0005
-)  # This is the amount of time a single iteration of the CRC process takes. This will need to be adjusted through observation, checking the output of the boot password read process until 0x100 bytes are being checked.
+CRC_DELAY = 0.0005  # This is the amount of time a single iteration of the CRC process takes. This will need to be adjusted through observation, checking the output of the boot password read process until 0x100 bytes are being checked.
 
-SEED_START = (
-    "1D00000"
-)  # This is the starting value for the expected timer value range for the Seed/Key calculation. This seems to work for both Pi 3B+ and Pi 4.
+SEED_START = "1D00000"  # This is the starting value for the expected timer value range for the Seed/Key calculation. This seems to work for both Pi 3B+ and Pi 4.
 
 sector_map_tc1791 = {  # Sector lengths for PMEM routines
     0: 0x4000,
@@ -73,8 +68,8 @@ def print_success_failure(data):
 def get_key_from_seed(seed_data):
     p = subprocess.run(
         [TWISTER_PATH, SEED_START, seed_data, "1"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
     )
     output_data = p.stdout.decode("us-ascii")
     return output_data
@@ -97,13 +92,10 @@ def get_isotp_conn():
 
 
 def sboot_pwm():
-    import time
     import wavePWM
 
-    GPIO = [12, 13]
-
     if not pi.connected:
-        exit(0)
+        sys.exit(0)
 
     pwm = wavePWM.PWM(pi)  # Use default frequency
 
@@ -221,10 +213,10 @@ def sboot_crc_reset(crc_start_address):
     conn.send(bytes([0x79]))
     time.sleep(CRC_DELAY)
     upload_bsl(True)
-    crc_address = int.from_bytes(read_byte(0xD0010770 .to_bytes(4, "big")), "little")
+    crc_address = int.from_bytes(read_byte(0xD0010770.to_bytes(4, "big")), "little")
     print("CRC Address Reached: ")
     print(hex(crc_address))
-    crc_data = int.from_bytes(read_byte(0xD0010778 .to_bytes(4, "big")), "little")
+    crc_data = int.from_bytes(read_byte(0xD0010778.to_bytes(4, "big")), "little")
     print("CRC32 Current Value: ")
     print(hex(crc_data))
     conn.close()
@@ -276,9 +268,9 @@ def sboot_login():
 
 
 def extract_boot_passwords():
-    addresses = map(
-        lambda x: bytearray.fromhex(x), ["8001420C", "80014210", "80014214", "80014218"]
-    )
+    addresses = [
+        bytearray.fromhex(x) for x in ["8001420C", "80014210", "80014214", "80014218"]
+    ]
     crcs = []
     for address in addresses:
         sboot_login()
@@ -310,7 +302,8 @@ def upload_bsl(skip_prep=False):
 
     print("Sending BSL initialization message...")
     # send bootloader.bin to CAN BSL in Tricore
-    bootloader_data = open("bootloader.bin", "rb").read()
+    with open("bootloader.bin", "rb") as bootloader_file:
+        bootloader_data = bootloader_file.read()
     data = [
         0x55,
         0x55,
@@ -326,9 +319,12 @@ def upload_bsl(skip_prep=False):
     bus.send(init_message)
     while success == False:
         message = bus.recv(0.5)
-        if message is not None and not message.is_error_frame:
-            if message.arbitration_id == 0x40:
-                success = True
+        if (
+            message is not None
+            and not message.is_error_frame
+            and message.arbitration_id == 0x40
+        ):
+            success = True
     print("Sending BSL data...")
     for block_base_address in tqdm(
         range(0, len(bootloader_data), 8), unit_scale=True, unit="blocks"
@@ -384,7 +380,6 @@ def write_byte(addr, value):
     data += bytearray([0x0, 0x0, 0x0])
     message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
     bus.send(message)
-    byte_data = bytearray()
     message = bus.recv()
     if message.data[0] != 0x3:
         return False
@@ -394,10 +389,7 @@ def write_byte(addr, value):
     message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
     bus.send(message)
     message = bus.recv()
-    if message.data[0] != 0x3:
-        return False
-    else:
-        return True
+    return message.data[0] == 0x3
 
 
 def send_passwords(pw1, pw2, ucb=0, read_write=0x8):
@@ -406,7 +398,6 @@ def send_passwords(pw1, pw2, ucb=0, read_write=0x8):
     data += bytearray([read_write, ucb, 0x0])
     message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
     bus.send(message)
-    byte_data = bytearray()
     message = bus.recv()
     print(message)
     data = bytearray([0x04])
@@ -421,7 +412,6 @@ def send_passwords(pw1, pw2, ucb=0, read_write=0x8):
     data += bytearray([read_write, ucb, 0x1])
     message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
     bus.send(message)
-    byte_data = bytearray()
     message = bus.recv()
     print(message)
     data = bytearray([0x04])
@@ -449,7 +439,7 @@ def print_enabled_disabled(string, value):
 
 def print_sector_status(string, procon_sector_status):
     current_address = 0
-    for sector_number in sector_map_tc1791:
+    for sector_number, sector_length in sector_map_tc1791.items():
         protection_status = procon_sector_status[sector_number]
         if sector_number > 9:
             protection_status = procon_sector_status[
@@ -465,12 +455,12 @@ def print_sector_status(string, procon_sector_status):
                 + " "
                 + hex(current_address)
                 + ":"
-                + hex((current_address + sector_map_tc1791[sector_number]))
+                + hex(current_address + sector_length)
                 + " : "
                 + "ENABLED"
             )
 
-        current_address += sector_map_tc1791[sector_number]
+        current_address += sector_length
 
 
 def read_flash_properties(flash_num, pmu_base_addr):
@@ -504,12 +494,20 @@ def read_flash_properties(flash_num, pmu_base_addr):
     )
 
     flash_status_overall = bits(fsr_value[0])
-    print_enabled_disabled(pmem_string + " Page Mode Enabled: ", flash_status_overall[6])
+    print_enabled_disabled(
+        pmem_string + " Page Mode Enabled: ", flash_status_overall[6]
+    )
 
     flash_status_errors = bits(fsr_value[1])
-    print_enabled_disabled(pmem_string + " Flash Operation Error: ", flash_status_errors[0])
-    print_enabled_disabled(pmem_string + " Flash Command Sequence Error: ", flash_status_errors[2])
-    print_enabled_disabled(pmem_string + " Flash Locked Error: ", flash_status_errors[3])
+    print_enabled_disabled(
+        pmem_string + " Flash Operation Error: ", flash_status_errors[0]
+    )
+    print_enabled_disabled(
+        pmem_string + " Flash Command Sequence Error: ", flash_status_errors[2]
+    )
+    print_enabled_disabled(
+        pmem_string + " Flash Locked Error: ", flash_status_errors[3]
+    )
     print_enabled_disabled(pmem_string + " Flash ECC Error: ", flash_status_errors[4])
 
     protection_status = bits(fcon_value[2])
@@ -538,87 +536,91 @@ def read_flash_properties(flash_num, pmu_base_addr):
 
 
 def read_bytes_file(base_addr, size, filename):
-    output_file = open(filename, "wb")
-    for current_address in tqdm(
-        range(base_addr, base_addr + size, 4), unit_scale=True, unit="block"
-    ):
-        bytes = read_byte(struct.pack(">I", current_address))
-        output_file.write(bytes)
-    output_file.close()
+    with open(filename, "wb") as output_file:
+        output_file.writelines(
+            read_byte(struct.pack(">I", current_address))
+            for current_address in tqdm(
+                range(base_addr, base_addr + size, 4), unit_scale=True, unit="block"
+            )
+        )
 
 
 def read_compressed(address, size, filename):
-    output_file = open(filename, "wb")
-    data = bytearray([0x07])
-    data += address
-    data += size
-    message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
-    bus.send(message)
-    total_size_remaining = int.from_bytes(size, "big")
-    t = tqdm(total=total_size_remaining, unit="B")
-    while total_size_remaining > 0:
-        message = bus.recv()
-        compressed_size = size_remaining = int.from_bytes(message.data[5:8], "big")
-        #print("Waiting for compressed data of size: " + hex(size_remaining))
-        data = bytearray()
-        sequence = 1
-        while size_remaining > 0:
-            message = bus.recv()
-            new_sequence = message.data[1]
-            if sequence != new_sequence:
-                print("Sequencing error! " + hex(new_sequence) + hex(sequence))
-                t.close()
-                output_file.close()
-                return
-            sequence += 1
-            sequence = sequence & 0xFF
-            data += message.data[2:8]
-            size_remaining -= 6
-        decompressed_data = lz4.block.decompress(data[:compressed_size], 4096)
-        decompressed_size = len(decompressed_data)
-        t.update(decompressed_size)
-        total_size_remaining -= decompressed_size
-        output_file.write(decompressed_data)
-        data = bytearray([0x07, 0xAC])  # send an ACk packet
+    with open(filename, "wb") as output_file:
+        data = bytearray([0x07])
+        data += address
+        data += size
         message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
         bus.send(message)
-    output_file.close()
-    t.close()
+        total_size_remaining = int.from_bytes(size, "big")
+        t = tqdm(total=total_size_remaining, unit="B")
+        while total_size_remaining > 0:
+            message = bus.recv()
+            compressed_size = size_remaining = int.from_bytes(message.data[5:8], "big")
+            # print("Waiting for compressed data of size: " + hex(size_remaining))
+            data = bytearray()
+            sequence = 1
+            while size_remaining > 0:
+                message = bus.recv()
+                new_sequence = message.data[1]
+                if sequence != new_sequence:
+                    print("Sequencing error! " + hex(new_sequence) + hex(sequence))
+                    t.close()
+                    return
+                sequence += 1
+                sequence = sequence & 0xFF
+                data += message.data[2:8]
+                size_remaining -= 6
+            decompressed_data = lz4.block.decompress(data[:compressed_size], 4096)
+            decompressed_size = len(decompressed_data)
+            t.update(decompressed_size)
+            total_size_remaining -= decompressed_size
+            output_file.write(decompressed_data)
+            data = bytearray([0x07, 0xAC])  # send an ACk packet
+            message = Message(
+                is_extended_id=False, dlc=8, arbitration_id=0x300, data=data
+            )
+            bus.send(message)
+        t.close()
+
 
 def write_file(address, size, filename):
-    input_file = open(filename, "rb")
-    total_size_remaining = int.from_bytes(size, "big")
-    t = tqdm(total=total_size_remaining, unit="B")
-    address_int = int.from_bytes(address, "big")
-    block_counter = 0
-    while total_size_remaining > 0:
-        if block_counter <= 0:
-          block_counter = 256
-          data = bytearray([0x06])
-          address_bytes = address_int.to_bytes(4, "big")
-          data += address_bytes
-          message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
-          bus.send(message)
-          bus.recv()
-        if block_counter < 7:
-          data_len = block_counter
-        else:
-          data_len = 7
-        file_data = input_file.read(data_len)
-        file_data += bytearray([0xAA] * (7 - data_len))
-        data = bytearray([0x06])
-        data += bytearray([file_data[0], file_data[1], file_data[2], file_data[3], file_data[4], file_data[5], file_data[6]])
-        message = Message(is_extended_id=False, dlc=8, arbitration_id=0x300, data=data)
-        bus.send(message)
-        time.sleep(0.005)
-        block_counter -= data_len
-        total_size_remaining -= data_len
-        if block_counter <= 0:
-          bus.recv()
-          t.update(total_size_remaining)
-          address_int += 256
-    input_file.close()
-    t.close()
+    with open(filename, "rb") as input_file:
+        total_size_remaining = int.from_bytes(size, "big")
+        t = tqdm(total=total_size_remaining, unit="B")
+        address_int = int.from_bytes(address, "big")
+        block_counter = 0
+        while total_size_remaining > 0:
+            if block_counter <= 0:
+                block_counter = 256
+                data = bytearray([0x06])
+                address_bytes = address_int.to_bytes(4, "big")
+                data += address_bytes
+                message = Message(
+                    is_extended_id=False, dlc=8, arbitration_id=0x300, data=data
+                )
+                bus.send(message)
+                bus.recv()
+            if block_counter < 7:
+                data_len = block_counter
+            else:
+                data_len = 7
+            file_data = input_file.read(data_len)
+            file_data += bytearray([0xAA] * (7 - data_len))
+            data = bytearray([0x06])
+            data += bytearray(file_data[0:7])
+            message = Message(
+                is_extended_id=False, dlc=8, arbitration_id=0x300, data=data
+            )
+            bus.send(message)
+            time.sleep(0.005)
+            block_counter -= data_len
+            total_size_remaining -= data_len
+            if block_counter <= 0:
+                bus.recv()
+                t.update(total_size_remaining)
+                address_int += 256
+        t.close()
 
 
 class BootloaderRepl(cmd.Cmd):
@@ -659,8 +661,8 @@ class BootloaderRepl(cmd.Cmd):
         "flashinfo: Read flash information including PMEM protection status"
         PMU_BASE_ADDRS = {0: 0xF8001000, 1: 0xF8003000}
 
-        for pmu_num in PMU_BASE_ADDRS:
-            read_flash_properties(pmu_num, PMU_BASE_ADDRS[pmu_num])
+        for pmu_num, pmu_base_addr in PMU_BASE_ADDRS.items():
+            read_flash_properties(pmu_num, pmu_base_addr)
 
     def do_dumpmaskrom(self, arg):
         "dumpmaskrom: Dump the Tricore Mask ROM to maskrom.bin"
@@ -716,7 +718,7 @@ class BootloaderRepl(cmd.Cmd):
         byte_specifier = bytearray.fromhex(args[0])
         length_specifier = bytearray.fromhex(args[1])
         filename = args[2]
-        is_success = read_compressed(byte_specifier, length_specifier, filename)
+        read_compressed(byte_specifier, length_specifier, filename)
 
     def do_write_file(self, arg):
         "write_file <addr> <length> <filename>: write data"
@@ -724,7 +726,7 @@ class BootloaderRepl(cmd.Cmd):
         byte_specifier = bytearray.fromhex(args[0])
         length_specifier = bytearray.fromhex(args[1])
         filename = args[2]
-        is_success = write_file(byte_specifier, length_specifier, filename)
+        write_file(byte_specifier, length_specifier, filename)
 
     def do_reset(self, arg):
         "reset: reset ECU"

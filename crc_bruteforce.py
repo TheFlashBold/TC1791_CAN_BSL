@@ -18,6 +18,7 @@ known_data.extend(bytes(232))  # Empty area in Flash
 known_data.extend(MT_SEED_CONSTANT)  # Seed constant is stored next in Flash
 known_data.extend(SHA256_K_VALUES)  # Followed by K-Values
 
+
 # Run CRCHack to infer the first 4 bytes of data given a CRC
 def infer_first_4_bytes(data, crc):
     '''Infer first 4 bytes of "data" using "crc"'''
@@ -44,8 +45,8 @@ def infer_first_4_bytes(data, crc):
             crc,
         ],
         input=data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
     )
     return p.stdout
 
