@@ -1,0 +1,23 @@
+[project]
+name = "tc1791-can-bsl"
+version = "0.1.0"
+description = "Bootstrap Loader tooling for the Infineon TC1791 (Simos18) over CAN"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "python-can",
+    "lz4",
+    "tqdm",
+    "pigpio",
+    "udsoncan",
+    "can-isotp",
+]
+
+[tool.uv]
+# Flat scripts at the repo root (bootloader.py, crc_bruteforce.py) - nothing to build or install.
+package = false
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.1",
+]

@@ -64,7 +64,7 @@ def bits(byte):
 
 
 def print_success_failure(data):
-    if data[0] is 0xA0:
+    if data[0] == 0xA0:
         print("Success")
     else:
         print("Failure! " + data.hex())

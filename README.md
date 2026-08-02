@@ -67,6 +67,7 @@ Connect the following pins of the left-hand connector when looking at the opened
 
 # Setup for Password Extraction
 
+* Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which manages the Python interpreter and dependencies for the tools in this repo. Nothing else needs to be installed by hand - `uv run <script>` creates and syncs `.venv` from `pyproject.toml`/`uv.lock` on first use. To pre-create the environment, run `uv sync`.
 * Clone https://github.com/bri3d/Simos18_SBOOT into a sibling directory and compile `twister.c` 
 * Clone https://github.com/resilar/crchack into a sibling directory and compile it per instructions.
 
@@ -78,10 +79,10 @@ Connect the following pins of the left-hand connector when looking at the opened
 * If your Pi and ECU are powered separately (for example, the Pi via USB and the ECU via a bench PSU), make sure the grounds are linked and not floating as this can cause issues. The easiest way to do this is to connect another GND pin on the ECU connector to a GND on the Pi.
 * Ensure `pigpiod` is running: `sudo pigpiod`
 * Ensure `can0` is up at bitrate `500000` and with the `txqueuelen` increased: `sudo ip link set can0 up type can bitrate 500000 && sudo ifconfig can0 txqueuelen 65536`
-* Start `python3 bootloader.py` and run the following commands:
+* Start `uv run bootloader.py` and run the following commands:
 
 ```
-$ python3 bootloader.py 
+$ uv run bootloader.py 
 Welcome to Tricore BSL. Type help or ? to list commands, you are likely looking for upload to start.
 
 (BSL) extract_boot_passwords
@@ -104,7 +105,7 @@ Concatenating the PMU0 and PMU1 files will produce the "bench read" format prefe
 * Since compressed writes are not yet implemented in the BSL, the easiest way to do this is simply to erase the first segment of Calibration, which will force the ECU into CBOOT.
 
 ```
-$ python3 bootloader.py 
+$ uv run bootloader.py 
 Welcome to Tricore BSL. Type help or ? to list commands, you are likely looking for upload to start.
 
 (BSL) extract_boot_passwords
