@@ -1,6 +1,14 @@
 # TC1791_CAN_BSL
 CAN Bootstrap Loader (BSL) for Tricore AudoMAX (TC1791 and friends)
 
+## Changes in this fork
+
+This fork adds LZ4-compressed PFlash writes, a reproducible freestanding build
+with a current TriCore GCC toolchain, and Raspberry Pi 5 GPIO support through
+`gpiozero`/`lgpio`. The checked-in `bootloader.bin` already contains command
+`0x08` for compressed writes. See [CHANGELOG.md](CHANGELOG.md) for the complete
+implementation and verification notes.
+
 # Background
 By setting the HWCFG register on Tricore processors to a specific value, the Mask ROM / Boot ROM in the CPU will enter a serial-based or CAN-based Bootstrap Loader.
 
