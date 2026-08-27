@@ -25,7 +25,7 @@ void FLASH_sendPasswords(enum FLASH_PROTECTION whichProtection, uword flashBaseA
 	__asm("nop");
 }
 
-void FLASH_eraseSector(FLASHn_FSR_t *flashFSR, uword flashBaseAddress, uword sectorBaseAddress)
+void FLASH_eraseSector(volatile FLASHn_FSR_t *flashFSR, uword flashBaseAddress, uword sectorBaseAddress)
 {
 	// Reset flash controller status
 	(*(volatile uword *) (flashBaseAddress + 0x5554)) = 0x00F5;
@@ -43,7 +43,7 @@ void FLASH_eraseSector(FLASHn_FSR_t *flashFSR, uword flashBaseAddress, uword sec
 	while ((flashFSR->bits.PBUSY != 0) || (flashFSR->bits.D0BUSY != 0) || (flashFSR->bits.D1BUSY != 0));
 }
 
-void FLASH_writePage(FLASHn_FSR_t *flashFSR, uword flashBaseAddress, uword pageBaseAddress, ubyte dataArray[256]) {
+void FLASH_writePage(volatile FLASHn_FSR_t *flashFSR, uword flashBaseAddress, uword pageBaseAddress, ubyte dataArray[256]) {
 	// Reset flash controller status
 	(*(volatile uword *) (flashBaseAddress + 0x5554)) = 0x00F5;
 	// Enter Assemble Page Mode

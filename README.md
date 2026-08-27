@@ -122,6 +122,17 @@ compatible. Rebuild `Bootloader_2` and replace the root `bootloader.bin` before
 using this command; the upstream prebuilt binary does not implement command
 `0x08`.
 
+Build the BSL with a current bare-metal TriCore GCC toolchain:
+
+```
+make -C Bootloader_2/iRAM rebuild TRICORE_TOOLS=/path/to/tricore-toolchain
+cp Bootloader_2/iRAM/Bootloader_2.bin bootloader.bin
+```
+
+The build is freestanding and includes the minimal TC1791 register definitions
+and runtime functions it needs; the proprietary DaVe `tc1791.h` and a target C
+library are not required.
+
 For the minimal recovery path, erase the first segment of Calibration to force
 the ECU into CBOOT:
 

@@ -68,6 +68,7 @@
 typedef unsigned char  ubyte;    // 1 byte unsigned; prefix: ub 
 typedef signed char    sbyte;    // 1 byte signed;   prefix: sb 
 typedef signed short   sshort;   // 2 byte signed;   prefix: ss 
+typedef unsigned short ushort;   // 2 byte unsigned; prefix: us
 typedef unsigned int   uword;    // 4 byte unsigned; prefix: uw 
 typedef signed int     sword;    // 4 byte signed;   prefix: sw 
 
@@ -161,7 +162,10 @@ void MAIN_vWriteWDTCON0(uword uwValue);
 //
 //****************************************************************************
 
-#define MAIN_vSetENDINIT() MAIN_vWriteWDTCON0(WDT_CON0.reg | 0x00000001)
+#define MAIN_vSetENDINIT() \
+	do { \
+		MAIN_vWriteWDTCON0(WDT_CON0.reg | 0x00000001); \
+	} while (0)
 
 
 //****************************************************************************
@@ -187,7 +191,12 @@ void MAIN_vWriteWDTCON0(uword uwValue);
 //
 //****************************************************************************
 
-#define MAIN_vResetENDINIT() MAIN_vWriteWDTCON0(WDT_CON0.reg & ~0x00000001);while (WDT_CON0.bits.ENDINIT != 0)
+#define MAIN_vResetENDINIT() \
+	do { \
+		MAIN_vWriteWDTCON0(WDT_CON0.reg & ~0x00000001); \
+		while (WDT_CON0.bits.ENDINIT != 0) { \
+		} \
+	} while (0)
 
 
 //****************************************************************************
@@ -206,9 +215,7 @@ void MAIN_vWriteWDTCON0(uword uwValue);
 
 #include  <tc1791.h> 
 #include  <machine/intrinsics.h>
-#include  <machine/cint.h>
 #include  <string.h>
-#include  <sys/types.h> 
 #include  "CAN.h"
 #include  "FLASH.h"
 

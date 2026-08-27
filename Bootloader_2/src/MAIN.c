@@ -344,7 +344,7 @@ void MAIN_CMD_unlockPassword(CAN_SWObj *cur_msg) {
 	FLASH_sendPasswords(passwordCmdState.readOrWrite, baseAddress,
 			passwordCmdState.firstPassword, secondPassword,
 			passwordCmdState.whichUCB);
-	FLASHn_FSR_t *flashFSR =
+	volatile FLASHn_FSR_t *flashFSR =
 			(passwordCmdState.whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
 	uword flashStatus = flashFSR->reg;
 	ubyte canData[8];
@@ -370,7 +370,7 @@ void MAIN_CMD_eraseFlashSector(CAN_SWObj *cur_msg) {
 			| (cur_msg->ubData[3] << 8) | cur_msg->ubData[4];
 	uword baseAddress = (address >= 0x80800000) ? 0x80800000 : 0x80000000;
 	uword whichController = (address >= 0x80800000);
-	FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
+	volatile FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
 	FLASH_eraseSector(flashFSR, baseAddress, address);
 	uword flashStatus = flashFSR->reg;
 	ubyte canData[8];
@@ -423,7 +423,7 @@ ubyte MAIN_CMD_writeFlashPageData(CAN_SWObj *cur_msg) {
 				(writePageState.address >= 0x80800000) ?
 						0x80800000 : 0x80000000;
 		uword whichController = (writePageState.address >= 0x80800000);
-		FLASHn_FSR_t *flashFSR =
+		volatile FLASHn_FSR_t *flashFSR =
 				(whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
 		FLASH_writePage(flashFSR, baseAddress, writePageState.address,
 				writePageState.assemblyBuffer);
@@ -624,7 +624,7 @@ void MAIN_CMD_finishCompressedWriteBlock(void) {
 	uword baseAddress = (compressWriteState.address >= 0x80800000U) ?
 			0x80800000U : 0x80000000U;
 	uword whichController = (compressWriteState.address >= 0x80800000U);
-	FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
+	volatile FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
 	uword flashStatus;
 	ubyte final;
 

@@ -5,6 +5,7 @@
 -include ../makefile.init
 
 RM := rm -rf
+CRT0 := $(shell "$(TRICORE_TOOLS)/bin/tricore-elf-gcc" -mcpu=tc1791 -print-file-name=crt0-tc1791.o)
 
 # All of the sources participating in the build are defined here
 -include sources.mk
@@ -32,19 +33,24 @@ endif
 rebuild: clean all
 
 # All Target
-all: Bootloader_2.elf
+all: Bootloader_2.elf Bootloader_2.bin
 
 # Tool invocations
 Bootloader_2.elf: $(OBJS) $(USER_OBJS) $(ASM)
 	@echo 'Building target: $@'
 	@echo 'Invoking: TriCore C Linker'
-	"$(TRICORE_TOOLS)/bin/tricore-elf-gcc" -o  "Bootloader_2.elf" -T"../ld/iRAM.ld" @"iRAM.objectlist" -Wl,--gc-sections -mcpu=tc1791 -Wl,-Map="$(basename $(notdir $@)).map" -Wl,--cref -fshort-double -Wl,-n -Wl,--extmap="a"
+	"$(TRICORE_TOOLS)/bin/tricore-elf-gcc" -nostdlib -nostartfiles -nodefaultlibs -o "Bootloader_2.elf" -T"../ld/iRAM.ld" "$(CRT0)" @"iRAM.objectlist" -Wl,--gc-sections -mcpu=tc1791 -Wl,-Map="$(basename $(notdir $@)).map" -Wl,--cref -fshort-double -Wl,-n -Wl,--extmap="a"
 	@echo 'Finished building target: $@'
+	@echo ' '
+
+Bootloader_2.bin: Bootloader_2.elf
+	@echo 'Generating raw bootloader: $@'
+	"$(TRICORE_TOOLS)/bin/tricore-elf-objcopy" -O binary "$<" "$@"
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) $(I_DEPS)$(PCP_S)$(EXECUTABLES)$(OBJS)$(C_DEPS)$(CPCP_DEPS) Bootloader_2.elf
+	-$(RM) $(I_DEPS)$(PCP_S)$(EXECUTABLES)$(OBJS)$(C_DEPS)$(CPCP_DEPS) Bootloader_2.elf Bootloader_2.bin
 	-@echo ' '
 
 .PHONY: all clean dependents

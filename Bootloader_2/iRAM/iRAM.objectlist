@@ -3,3 +3,4 @@ src/FLASH.o
 src/MAIN.o
 src/lz4.o
 src/lz4_decompress.o
+src/runtime.o

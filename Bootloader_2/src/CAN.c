@@ -222,6 +222,7 @@ ubyte i;
   while ((CAN_CLC.reg & 0x00000002 )== 0x00000002);  //wait until module is enabled
   CAN_FDR.reg    = 0x000043FF;   // load fractional divider register
   uwTemp         = CAN_FDR.reg;  // dummy read to avoid pipeline effects
+  (void)uwTemp;
   MAIN_vSetENDINIT();
 
   //   - wait until Panel has finished the initialisation
@@ -1081,4 +1082,3 @@ ubyte CAN_ubReadFIFO(ubyte ubObjNr, CAN_SWObj *pstObj)
 // USER CODE BEGIN (CAN_General,10)
 
 // USER CODE END
-
