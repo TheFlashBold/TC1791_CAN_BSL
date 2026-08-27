@@ -102,7 +102,28 @@ Concatenating the PMU0 and PMU1 files will produce the "bench read" format prefe
 
 # Recovering a bricked Simos18 ECU:
 
-* Since compressed writes are not yet implemented in the BSL, the easiest way to do this is simply to erase the first segment of Calibration, which will force the ECU into CBOOT.
+The BSL supports LZ4-compressed PFlash writes with the `compressed_write`
+command. The destination and length must be aligned to 256-byte flash pages,
+the range must stay within one PFlash bank, and every destination sector must
+be erased before writing. The BSL validates transfer sequencing, compressed and
+decompressed sizes, PFlash boundaries, and flash-controller errors.
+
+For example, after unlocking write protection and erasing every sector covered
+by the input image:
+
+```
+(BSL) compressed_write 80800000 100000 PMU1_PFlash.bin
+```
+
+The wire protocol uses command `0x08`, transfers independent LZ4 blocks of at
+most 4096 uncompressed bytes, and writes each decoded block as 256-byte PFlash
+pages. The existing `write_file` command and all read commands remain
+compatible. Rebuild `Bootloader_2` and replace the root `bootloader.bin` before
+using this command; the upstream prebuilt binary does not implement command
+`0x08`.
+
+For the minimal recovery path, erase the first segment of Calibration to force
+the ECU into CBOOT:
 
 ```
 $ uv run bootloader.py 

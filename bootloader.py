@@ -13,6 +13,17 @@ from tqdm import tqdm
 from udsoncan.connections import IsoTPSocketConnection
 
 import crc_bruteforce
+from bsl_protocol import (
+    WRITE_BLOCK_DONE,
+    WRITE_BLOCK_READY,
+    WRITE_BLOCK_SIZE,
+    WRITE_READY,
+    CompressedWriteProtocolError,
+    build_compressed_write_metadata,
+    build_compressed_write_start,
+    iter_compressed_write_data_frames,
+    parse_compressed_write_response,
+)
 
 TWISTER_PATH = "../Simos18_SBOOT/twister"  # This is the path to the "twister" binary from https://github.com/bri3d/Simos18_SBOOT
 
@@ -20,6 +31,10 @@ TWISTER_PATH = "../Simos18_SBOOT/twister"  # This is the path to the "twister" b
 
 # For a Pi 3B+, 0.0005 seems right. For a Pi 4, 0.0008 has been observed to work correctly (presumably latency between sleep and GPIO is lower).
 CRC_DELAY = 0.0005  # This is the amount of time a single iteration of the CRC process takes. This will need to be adjusted through observation, checking the output of the boot password read process until 0x100 bytes are being checked.
+
+# Conservative pacing for host-to-BSL raw CAN frames. This is substantially
+# faster than the legacy page writer while avoiding receive-object overruns.
+COMPRESSED_WRITE_FRAME_DELAY = 0.001
 
 SEED_START = "1D00000"  # This is the starting value for the expected timer value range for the Seed/Key calculation. This seems to work for both Pi 3B+ and Pi 4.
 
@@ -623,6 +638,86 @@ def write_file(address, size, filename):
         t.close()
 
 
+def wait_compressed_write_response(expected_stage, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"timed out waiting for compressed-write stage 0x{expected_stage:02x}"
+            )
+        message = bus.recv(remaining)
+        if message is None:
+            continue
+        payload = bytes(message.data)
+        if len(payload) != 8 or payload[0] != 0x08:
+            continue
+        return parse_compressed_write_response(payload, expected_stage)
+
+
+def write_compressed_file(address, size, filename):
+    address_int = int.from_bytes(address, "big")
+    size_int = int.from_bytes(size, "big")
+    start_frame = build_compressed_write_start(address_int, size_int)
+
+    with open(filename, "rb") as input_file:
+        input_data = input_file.read(size_int)
+    if len(input_data) != size_int:
+        raise ValueError(
+            f"{filename} contains only {len(input_data)} bytes, expected {size_int}"
+        )
+
+    bus.send(
+        Message(
+            is_extended_id=False,
+            dlc=8,
+            arbitration_id=0x300,
+            data=start_frame,
+        )
+    )
+    wait_compressed_write_response(WRITE_READY)
+
+    t = tqdm(total=size_int, unit="B", unit_scale=True)
+    try:
+        for offset in range(0, size_int, WRITE_BLOCK_SIZE):
+            raw_block = input_data[offset : offset + WRITE_BLOCK_SIZE]
+            compressed = lz4.block.compress(raw_block, store_size=False)
+            metadata = build_compressed_write_metadata(
+                len(raw_block), len(compressed)
+            )
+            bus.send(
+                Message(
+                    is_extended_id=False,
+                    dlc=8,
+                    arbitration_id=0x300,
+                    data=metadata,
+                )
+            )
+            wait_compressed_write_response(WRITE_BLOCK_READY)
+
+            for frame in iter_compressed_write_data_frames(compressed):
+                bus.send(
+                    Message(
+                        is_extended_id=False,
+                        dlc=8,
+                        arbitration_id=0x300,
+                        data=frame,
+                    )
+                )
+                time.sleep(COMPRESSED_WRITE_FRAME_DELAY)
+
+            final, flash_status = wait_compressed_write_response(WRITE_BLOCK_DONE)
+            expected_final = offset + len(raw_block) == size_int
+            if final != expected_final:
+                raise CompressedWriteProtocolError(
+                    "target and host disagree about the final compressed block"
+                )
+            t.update(len(raw_block))
+            t.set_postfix(fsr=f"0x{flash_status:08x}")
+    finally:
+        t.close()
+
+
 class BootloaderRepl(cmd.Cmd):
     intro = "Welcome to Tricore BSL. Type help or ? to list commands, you are likely looking for upload to start.\n"
     prompt = "(BSL) "
@@ -727,6 +822,19 @@ class BootloaderRepl(cmd.Cmd):
         length_specifier = bytearray.fromhex(args[1])
         filename = args[2]
         write_file(byte_specifier, length_specifier, filename)
+
+    def do_compressed_write(self, arg):
+        "compressed_write <addr> <length> <filename>: write page-aligned, pre-erased PFlash using LZ4 compression"
+        args = arg.split()
+        if len(args) != 3:
+            print("usage: compressed_write <addr> <length> <filename>")
+            return
+        try:
+            byte_specifier = bytearray.fromhex(args[0])
+            length_specifier = bytearray.fromhex(args[1])
+            write_compressed_file(byte_specifier, length_specifier, args[2])
+        except (OSError, TimeoutError, ValueError, CompressedWriteProtocolError) as error:
+            print(f"Compressed write failed: {error}")
 
     def do_reset(self, arg):
         "reset: reset ECU"

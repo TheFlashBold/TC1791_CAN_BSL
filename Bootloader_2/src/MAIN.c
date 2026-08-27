@@ -204,6 +204,7 @@ struct bootloader_state boot;
 struct password_cmd_state passwordCmdState;
 struct write_page_state writePageState;
 struct compress_read_state compressReadState;
+struct compress_write_state compressWriteState;
 
 void MAIN_sendCan(ubyte canData[]) {
 	while (CAN_ubRequestMsgObj(1) != 1)
@@ -515,6 +516,179 @@ void MAIN_CMD_readCompressed(CAN_SWObj *cur_msg) {
 	}
 }
 
+#define COMPRESSED_WRITE_READY 0xA0
+#define COMPRESSED_WRITE_BLOCK_READY 0xA1
+#define COMPRESSED_WRITE_BLOCK_DONE 0xA2
+
+#define COMPRESSED_WRITE_ERR_RANGE 0x01
+#define COMPRESSED_WRITE_ERR_META 0x02
+#define COMPRESSED_WRITE_ERR_SEQUENCE 0x03
+#define COMPRESSED_WRITE_ERR_DECOMPRESS 0x04
+#define COMPRESSED_WRITE_ERR_FLASH 0x05
+#define COMPRESSED_WRITE_ERR_STATE 0x06
+
+/* FSR bits: OPER, SQER, PROER and PVER. */
+#define FLASH_STATUS_ERROR_MASK 0x00001D00U
+
+void MAIN_sendCompressedWriteResponse(ubyte stage, ubyte error, ubyte final,
+		uword flashStatus) {
+	ubyte canData[8];
+	canData[0] = WRITE_COMPRESSED;
+	canData[1] = stage;
+	canData[2] = error;
+	canData[3] = final;
+	canData[4] = (flashStatus >> 24) & 0xFF;
+	canData[5] = (flashStatus >> 16) & 0xFF;
+	canData[6] = (flashStatus >> 8) & 0xFF;
+	canData[7] = flashStatus & 0xFF;
+	MAIN_sendCan(canData);
+}
+
+void MAIN_abortCompressedWrite(ubyte stage, ubyte error, uword flashStatus) {
+	boot.status = WAIT_COMMAND;
+	memset(&compressWriteState, 0x00, sizeof(struct compress_write_state));
+	MAIN_sendCompressedWriteResponse(stage, error, 0, flashStatus);
+}
+
+ubyte MAIN_isValidPFlashRange(uword address, uword length) {
+	if ((address & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U || length == 0U
+			|| (length & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U) {
+		return 0;
+	}
+	if (address >= 0x80000000U && address < 0x80200000U) {
+		return length <= (0x80200000U - address);
+	}
+	if (address >= 0x80800000U && address < 0x80A00000U) {
+		return length <= (0x80A00000U - address);
+	}
+	return 0;
+}
+
+/*
+ * 0x8: Begin an LZ4-compressed PFlash write.
+ * Bytes 1-4 contain the big-endian destination address and bytes 5-7 the
+ * 24-bit uncompressed length. The complete range must be 256-byte aligned and
+ * stay inside a single TC1791 PFlash bank. Flash must already be erased.
+ */
+void MAIN_CMD_writeCompressedStart(CAN_SWObj *cur_msg) {
+	uword address = (cur_msg->ubData[1] << 24) | (cur_msg->ubData[2] << 16)
+			| (cur_msg->ubData[3] << 8) | cur_msg->ubData[4];
+	uword length = (cur_msg->ubData[5] << 16) | (cur_msg->ubData[6] << 8)
+			| cur_msg->ubData[7];
+	if (!MAIN_isValidPFlashRange(address, length)) {
+		MAIN_abortCompressedWrite(COMPRESSED_WRITE_READY,
+				COMPRESSED_WRITE_ERR_RANGE, 0);
+		return;
+	}
+	memset(&compressWriteState, 0x00, sizeof(struct compress_write_state));
+	compressWriteState.address = address;
+	compressWriteState.remaining = length;
+	boot.status = WAIT_COMPRESSED_WRITE_META;
+	MAIN_sendCompressedWriteResponse(COMPRESSED_WRITE_READY, 0, 0, 0);
+}
+
+/*
+ * Block metadata: 08 FF <raw_len:BE16> <compressed_len:BE16> 00 00.
+ * A raw block is at most 4096 bytes and must contain whole flash pages.
+ */
+void MAIN_CMD_writeCompressedMeta(CAN_SWObj *cur_msg) {
+	uword rawLength;
+	uword compressedLength;
+	if (cur_msg->ubData[0] != WRITE_COMPRESSED || cur_msg->ubData[1] != 0xFF) {
+		MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_READY,
+				COMPRESSED_WRITE_ERR_STATE, 0);
+		return;
+	}
+	rawLength = (cur_msg->ubData[2] << 8) | cur_msg->ubData[3];
+	compressedLength = (cur_msg->ubData[4] << 8) | cur_msg->ubData[5];
+	if (rawLength == 0U || rawLength > COMPRESSED_WRITE_BLOCK_SIZE
+			|| (rawLength & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U
+			|| rawLength > compressWriteState.remaining
+			|| compressedLength == 0U
+			|| compressedLength > COMPRESSED_WRITE_BUFFER_SIZE) {
+		MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_READY,
+				COMPRESSED_WRITE_ERR_META, 0);
+		return;
+	}
+	compressWriteState.rawLength = rawLength;
+	compressWriteState.compressedLength = compressedLength;
+	compressWriteState.compressedCursor = 0;
+	compressWriteState.expectedSequence = 0;
+	boot.status = WAIT_COMPRESSED_WRITE_DATA;
+	MAIN_sendCompressedWriteResponse(COMPRESSED_WRITE_BLOCK_READY, 0, 0, 0);
+}
+
+void MAIN_CMD_finishCompressedWriteBlock(void) {
+	int decompressedLength;
+	uword pageOffset;
+	uword baseAddress = (compressWriteState.address >= 0x80800000U) ?
+			0x80800000U : 0x80000000U;
+	uword whichController = (compressWriteState.address >= 0x80800000U);
+	FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
+	uword flashStatus;
+	ubyte final;
+
+	decompressedLength = LZ4_decompress_safe(
+			(const char*) compressWriteState.compressedBuffer,
+			(char*) compressWriteState.decompressedBuffer,
+			compressWriteState.compressedLength, compressWriteState.rawLength);
+	if (decompressedLength != (int) compressWriteState.rawLength) {
+		MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_DONE,
+				COMPRESSED_WRITE_ERR_DECOMPRESS, 0);
+		return;
+	}
+
+	for (pageOffset = 0; pageOffset < compressWriteState.rawLength;
+			pageOffset += COMPRESSED_WRITE_PAGE_SIZE) {
+		FLASH_writePage(flashFSR, baseAddress,
+				compressWriteState.address + pageOffset,
+				&compressWriteState.decompressedBuffer[pageOffset]);
+		flashStatus = flashFSR->reg;
+		if ((flashStatus & FLASH_STATUS_ERROR_MASK) != 0U) {
+			MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_DONE,
+					COMPRESSED_WRITE_ERR_FLASH, flashStatus);
+			return;
+		}
+	}
+
+	compressWriteState.address += compressWriteState.rawLength;
+	compressWriteState.remaining -= compressWriteState.rawLength;
+	final = (compressWriteState.remaining == 0U);
+	flashStatus = flashFSR->reg;
+	boot.status = final ? WAIT_COMMAND : WAIT_COMPRESSED_WRITE_META;
+	MAIN_sendCompressedWriteResponse(COMPRESSED_WRITE_BLOCK_DONE, 0, final,
+			flashStatus);
+	if (final) {
+		memset(&compressWriteState, 0x00, sizeof(struct compress_write_state));
+	}
+}
+
+/* Data frame: 08 <sequence> <six compressed bytes>. */
+void MAIN_CMD_writeCompressedData(CAN_SWObj *cur_msg) {
+	uword bytesRemaining;
+	uword bytesToCopy;
+	uword i;
+	if (cur_msg->ubData[0] != WRITE_COMPRESSED
+			|| cur_msg->ubData[1] != compressWriteState.expectedSequence) {
+		MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_DONE,
+				COMPRESSED_WRITE_ERR_SEQUENCE, 0);
+		return;
+	}
+	bytesRemaining = compressWriteState.compressedLength
+			- compressWriteState.compressedCursor;
+	bytesToCopy = MIN(6U, bytesRemaining);
+	for (i = 0; i < bytesToCopy; i++) {
+		compressWriteState.compressedBuffer[compressWriteState.compressedCursor]
+				= cur_msg->ubData[i + 2];
+		compressWriteState.compressedCursor++;
+	}
+	compressWriteState.expectedSequence++;
+	if (compressWriteState.compressedCursor
+			== compressWriteState.compressedLength) {
+		MAIN_CMD_finishCompressedWriteBlock();
+	}
+}
+
 void MAIN_processMessage(CAN_SWObj *cur_msg) {
 	switch (boot.status) {
 	case WAIT_COMMAND: {
@@ -549,6 +723,9 @@ void MAIN_processMessage(CAN_SWObj *cur_msg) {
 			break;
 		case READ_COMPRESSED:
 			MAIN_CMD_readCompressed(cur_msg);
+			break;
+		case WRITE_COMPRESSED:
+			MAIN_CMD_writeCompressedStart(cur_msg);
 			break;
 		default: {
 			break;
@@ -630,6 +807,14 @@ void MAIN_processMessage(CAN_SWObj *cur_msg) {
 			break;
 		}
 		}
+		break;
+	}
+	case WAIT_COMPRESSED_WRITE_META: {
+		MAIN_CMD_writeCompressedMeta(cur_msg);
+		break;
+	}
+	case WAIT_COMPRESSED_WRITE_DATA: {
+		MAIN_CMD_writeCompressedData(cur_msg);
 		break;
 	}
 	default: {

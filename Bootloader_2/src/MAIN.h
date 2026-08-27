@@ -223,14 +223,17 @@ enum CAN_COMMAND {
 	UNLOCK_PASSWORD = 4,
 	ERASE_SECTOR = 5,
 	WRITE_PAGE = 6,
-	READ_COMPRESSED = 7
+	READ_COMPRESSED = 7,
+	WRITE_COMPRESSED = 8
 };
 
 enum CURRENT_STATUS {
 	WAIT_COMMAND = 0,
 	WAIT_WRITE32_DATA = 1,
 	WAIT_WRITEPAGE_DATA = 2,
-	WAIT_PASSWORD_DATA = 3
+	WAIT_PASSWORD_DATA = 3,
+	WAIT_COMPRESSED_WRITE_META = 4,
+	WAIT_COMPRESSED_WRITE_DATA = 5
 };
 
 struct bootloader_state {
@@ -257,6 +260,21 @@ struct compress_read_state {
 	uword address;
 	uword cursor;
 	uword length;
+};
+
+#define COMPRESSED_WRITE_PAGE_SIZE 256U
+#define COMPRESSED_WRITE_BLOCK_SIZE 4096U
+#define COMPRESSED_WRITE_BUFFER_SIZE (COMPRESSED_WRITE_BLOCK_SIZE + (COMPRESSED_WRITE_BLOCK_SIZE / 255U) + 16U)
+
+struct compress_write_state {
+	uword address;
+	uword remaining;
+	uword rawLength;
+	uword compressedLength;
+	uword compressedCursor;
+	ubyte expectedSequence;
+	ubyte compressedBuffer[COMPRESSED_WRITE_BUFFER_SIZE];
+	ubyte decompressedBuffer[COMPRESSED_WRITE_BLOCK_SIZE];
 };
 
 
