@@ -23,7 +23,7 @@ Furthermore, if the ECU is not locked by the Immobilizer and is functioning corr
 * All of these parts are common electronics parts. You may have most, or even all of them already. Starting from scratch, I estimate this setup could be constructed for around $100.
 
 * 12-14V bench power supply. I usually supply 13.6V.
-* Raspberry Pi 2, 3, or 4 (3B preferred).
+* Raspberry Pi 5.
 * Seeeed Studios 2517/2518FD CAN Hat. 2515 CAN hats are not capable of reliably completing a read process, but may be useful for brick recovery.
 * 20+ various lengths of wire. A breadboard wire kit will be enough.
 * A resistor - 1K preferred, higher values may work as well.
@@ -44,11 +44,11 @@ The next set of connections is to enable the correct VOut phases of the SC9 powe
 
 ![PCB3](Board3.jpg)
 
-This connection needs to connect to Raspberry Pi GPIO 24 (see https://pinout.xyz ). This is the HWCFG selection we use to select "BSL Mode" for the TriCore CPU. If you are not extracting passwords and just want BSL access, you can just tie this to GND to always enter BSL Mode.
+This connection needs to connect to Raspberry Pi BCM GPIO 27 (physical pin 13). This is the HWCFG selection used to select "BSL Mode" for the TriCore CPU. If you are not extracting passwords and only need BSL access, it can instead be tied to GND.
 
 ![PCB2](Board2.jpg)
 
-(optional, needed for password extraction only): Connect the following probe to Raspberry Pi GPIO 23 - this is the CPU RST pin we use to perform a reset exploit to infer boot passwords.
+(optional, needed for password extraction only): Connect the following probe to Raspberry Pi BCM GPIO 22 (physical pin 15). This is the CPU RST pin used by the reset exploit to infer boot passwords.
 
 ![RST](RST.jpg)
 
@@ -60,24 +60,24 @@ Connect the following pins of the left-hand connector when looking at the opened
 * GROUND: 1 (this is the upper-right large pin).
 * CANH: 79, to CAN interface CanH
 * CANL: 80, to CAN interface CanL
-* "PWM1": 66 (only necessary for SBOOT), to a 5V level shifter attached to GPIO 12.
-* "PWM2": 71 (only necessary for SBOOT), to a 5V level shifter attached to GPIO 13.
+* "PWM1": 66 (only necessary for SBOOT), through a 5V level shifter to an external 3.2 kHz waveform source.
+* "PWM2": 71 (only necessary for SBOOT), through a 5V level shifter to the second external waveform.
 
 ![Connector Pinout](pinout_connector.jpg)
 
 # Setup for Password Extraction
 
-* Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which manages the Python interpreter and dependencies for the tools in this repo. Nothing else needs to be installed by hand - `uv run <script>` creates and syncs `.venv` from `pyproject.toml`/`uv.lock` on first use. To pre-create the environment, run `uv sync`.
+* Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run `uv sync`. The Pi 5 GPIO implementation uses `gpiozero` with the `lgpio` character-device backend; `pigpiod` is not used.
 * Clone https://github.com/bri3d/Simos18_SBOOT into a sibling directory and compile `twister.c` 
 * Clone https://github.com/resilar/crchack into a sibling directory and compile it per instructions.
+* Supply the two SBOOT PWM waveforms externally before running password extraction. The Pi 5 script controls RESET and BOOT_CFG only.
 
 # "Bench reading" a Simos18 ECU:
 
 * Perform the above steps to configure the ECU for BSL mode. Ensure you have `../Simos18_SBOOT/twister` and `../crchack/crchack` compiled.
-* In total, you should have seven connections to the ECU mainboard, via probes or solder - a jumper between two test points, two points connected via resistor to a third point (3V3), and two points connected directly to GPIO 23 and 24 on the Pi. 
-* You should also have eight connections to the ECU connector: GPIO 12 should be attached to a 5V level shifter, then to pin 66 on the ECU connector. GPIO 13 should be attached to another 5V level shifter, then to pin 71 on the ECU connector. CanH to pin 79 and CanL to pin 80. Then, 3 power connections and 1 ground connection. 
+* Connect RESET to BCM GPIO 22 and BOOT_CFG to BCM GPIO 27. Use the `gpiotest` command to verify both header pins slowly with a meter before attaching the ECU.
+* Connect the two externally generated PWM signals through level shifters to connector pins 66 and 71. Connect CANH to pin 79 and CANL to pin 80, plus the three power connections and ground.
 * If your Pi and ECU are powered separately (for example, the Pi via USB and the ECU via a bench PSU), make sure the grounds are linked and not floating as this can cause issues. The easiest way to do this is to connect another GND pin on the ECU connector to a GND on the Pi.
-* Ensure `pigpiod` is running: `sudo pigpiod`
 * Ensure `can0` is up at bitrate `500000` and with the `txqueuelen` increased: `sudo ip link set can0 up type can bitrate 500000 && sudo ifconfig can0 txqueuelen 65536`
 * Start `uv run bootloader.py` and run the following commands:
 

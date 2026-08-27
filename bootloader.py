@@ -2,13 +2,14 @@ import cmd
 import math
 import struct
 import subprocess
-import sys
 import time
 
 import can
 import lz4.block
-import pigpio
 from can import Message
+from gpiozero import Device, DigitalOutputDevice
+from gpiozero.exc import BadPinFactory
+from gpiozero.pins.lgpio import LGPIOFactory
 from tqdm import tqdm
 from udsoncan.connections import IsoTPSocketConnection
 
@@ -29,14 +30,22 @@ TWISTER_PATH = "../Simos18_SBOOT/twister"  # This is the path to the "twister" b
 
 # Configurable parameters:
 
-# For a Pi 3B+, 0.0005 seems right. For a Pi 4, 0.0008 has been observed to work correctly (presumably latency between sleep and GPIO is lower).
-CRC_DELAY = 0.0005  # This is the amount of time a single iteration of the CRC process takes. This will need to be adjusted through observation, checking the output of the boot password read process until 0x100 bytes are being checked.
+# Raspberry Pi 5 starting value. This is timing-sensitive and may still need
+# adjustment until the boot-password read process checks exactly 0x100 bytes.
+CRC_DELAY = 0.0008
 
 # Conservative pacing for host-to-BSL raw CAN frames. This is substantially
 # faster than the legacy page writer while avoiding receive-object overruns.
 COMPRESSED_WRITE_FRAME_DELAY = 0.001
 
-SEED_START = "1D00000"  # This is the starting value for the expected timer value range for the Seed/Key calculation. This seems to work for both Pi 3B+ and Pi 4.
+SEED_START = "1330000"
+
+# BCM GPIO numbering on the Raspberry Pi 5.
+# GPIO22 = physical pin 15, GPIO27 = physical pin 13.
+RESET_GPIO = 22
+BOOT_CFG_GPIO = 27
+RESET_PULSE_SECONDS = 0.01
+SBOOT_RESPONSE_TIMEOUT_SECONDS = 5.0
 
 sector_map_tc1791 = {  # Sector lengths for PMEM routines
     0: 0x4000,
@@ -74,10 +83,18 @@ def bits(byte):
 
 
 def print_success_failure(data):
+    if data is None:
+        print("Failure! no response")
+        return False
+    if len(data) == 0:
+        print("Failure! empty response")
+        return False
     if data[0] == 0xA0:
         print("Success")
+        return True
     else:
         print("Failure! " + data.hex())
+        return False
 
 
 def get_key_from_seed(seed_data):
@@ -91,10 +108,21 @@ def get_key_from_seed(seed_data):
 
 
 can_interface = "can0"
-bus = can.interface.Bus(can_interface, bustype="socketcan")
-pi = pigpio.pi()
-pi.set_mode(23, pigpio.OUTPUT)
-pi.set_pull_up_down(23, pigpio.PUD_UP)
+
+# Pi 5 uses the GPIO character-device API instead of the legacy pigpio path.
+try:
+    Device.pin_factory = LGPIOFactory()
+    reset_pin = DigitalOutputDevice(
+        RESET_GPIO, active_high=True, initial_value=True
+    )
+except (BadPinFactory, OSError) as exc:
+    raise SystemExit(
+        "No usable GPIO backend found. On Raspberry Pi 5 install lgpio "
+        "and grant this user access to the GPIO character device."
+    ) from exc
+
+bus = can.interface.Bus(channel=can_interface, interface="socketcan")
+boot_cfg_pin = None
 
 
 def get_isotp_conn():
@@ -106,54 +134,43 @@ def get_isotp_conn():
     return conn
 
 
-def sboot_pwm():
-    import wavePWM
-
-    if not pi.connected:
-        sys.exit(0)
-
-    pwm = wavePWM.PWM(pi)  # Use default frequency
-
-    pwm.set_frequency(3210)
-    cl = pwm.get_cycle_length()
-    pwm.set_pulse_start_in_micros(13, cl / 1)
-    pwm.set_pulse_length_in_micros(13, cl / 2)
-
-    pwm.set_pulse_start_in_micros(12, 3 * cl / 4)
-    pwm.set_pulse_length_in_micros(12, cl / 4)
-    pwm.update()
-    return pwm
-
-
 def reset_ecu():
-    pi.write(23, 0)
-    time.sleep(0.01)
-    pi.write(23, 1)
+    reset_pin.off()
+    time.sleep(RESET_PULSE_SECONDS)
+    reset_pin.on()
 
 
 def sboot_getseed():
     conn = get_isotp_conn()
-    print("Sending 0x30 to elevate SBOOT shell status...")
-    conn.send(bytes([0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
-    print_success_failure(conn.wait_frame())
-    time.sleep(1)
-    print("Sending 0x54 Generate Seed...")
-    conn.send(bytes([0x54]))
-    data = conn.wait_frame()
-    print_success_failure(data)
-    data = data[9:]
-    conn.close()
-    return data
+    try:
+        print("Sending 0x30 to elevate SBOOT shell status...")
+        conn.send(bytes([0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+        if not print_success_failure(conn.wait_frame()):
+            return None
+        time.sleep(1)
+        print("Sending 0x54 Generate Seed...")
+        conn.send(bytes([0x54]))
+        data = conn.wait_frame()
+        if not print_success_failure(data):
+            return None
+        if len(data) < 13:
+            print("Failure! seed response too short: " + data.hex())
+            return None
+        return data[9:]
+    finally:
+        conn.close()
 
 
 def sboot_sendkey(key_data):
     conn = get_isotp_conn()
-    send_data = bytearray([0x65])
-    send_data.extend(key_data)
-    print("Sending 0x65 Security Access with Key...")
-    conn.send(send_data)
-    print_success_failure(conn.wait_frame())
-    conn.close()
+    try:
+        send_data = bytearray([0x65])
+        send_data.extend(key_data)
+        print("Sending 0x65 Security Access with Key...")
+        conn.send(send_data)
+        return print_success_failure(conn.wait_frame())
+    finally:
+        conn.close()
 
 
 def sboot_crc_reset(crc_start_address):
@@ -239,20 +256,21 @@ def sboot_crc_reset(crc_start_address):
 
 
 def sboot_shell():
-    print("Setting up PWM waveforms...")
-    pwm = sboot_pwm()
-    time.sleep(1)
+    print("External PWM must already be active.")
     print("Resetting ECU into Supplier Bootloader...")
     reset_ecu()
     bus.send(Message(data=[0x59, 0x45], arbitration_id=0x7E0, is_extended_id=False))
     print("Sending 59 45...")
     bus.send(Message(data=[0x6B], arbitration_id=0x7E0, is_extended_id=False))
     stage2 = False
-    while True:
+    deadline = time.monotonic() + SBOOT_RESPONSE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
         if stage2 is True:
             bus.send(Message(data=[0x6B], arbitration_id=0x7E0, is_extended_id=False))
             print("Sending 6B...")
-        message = bus.recv(0.01)
+        message = bus.recv(0.05)
+        if message is None:
+            continue
         print(message)
         if (
             message is not None
@@ -262,24 +280,40 @@ def sboot_shell():
             print("Got A0 message")
             if stage2:
                 print("Switching to IsoTP Socket...")
-                pwm.cancel()
                 return sboot_getseed()
             print("Sending 6B...")
             stage2 = True
         if message is not None and message.arbitration_id == 0x0A7:
-            print("FAILURE")
-            pwm.cancel()
-            return False
+            print(
+                "FAILURE: received normal ECU CAN traffic on 0x0A7. "
+                "SBOOT entry was missed; check external PWM level/phase and "
+                "reset timing."
+            )
+            return None
+    print(
+        "FAILURE: timed out waiting for SBOOT response on 0x7E8. "
+        "Check CAN wiring, external PWM level/phase, and reset pulse."
+    )
+    return None
 
 
 def sboot_login():
     sboot_seed = sboot_shell()
+    if sboot_seed is None:
+        print("SBOOT seed not received; aborting login.")
+        return False
+    if not isinstance(sboot_seed, (bytes, bytearray)) or len(sboot_seed) < 4:
+        print("Invalid SBOOT seed; aborting login.")
+        return False
     print("Calculating key for seed: ")
     print(sboot_seed.hex())
-    key = get_key_from_seed(sboot_seed.hex()[0:8])
+    key = get_key_from_seed(sboot_seed.hex()[0:8]).strip()
+    if len(key) == 0:
+        print("Failed to calculate key; twister returned no data.")
+        return False
     print("Key calculated : ")
     print(key)
-    sboot_sendkey(bytearray.fromhex(key))
+    return sboot_sendkey(bytearray.fromhex(key))
 
 
 def extract_boot_passwords():
@@ -288,7 +322,9 @@ def extract_boot_passwords():
     ]
     crcs = []
     for address in addresses:
-        sboot_login()
+        if not sboot_login():
+            print("Stopping boot-password extraction because SBOOT login failed.")
+            return
         end_address, crc = sboot_crc_reset(address)
         print(address.hex() + " - " + hex(end_address) + " -> " + hex(crc))
         crcs.append(hex(crc))
@@ -300,20 +336,31 @@ def extract_boot_passwords():
 
 
 def prepare_upload_bsl():
-    # Pin 24 -> BOOT_CFG pin, pulled to GND to enable BSL mode.
+    global boot_cfg_pin
+
+    # Drive BOOT_CFG low to enable BSL mode.
     print("Resetting ECU into HWCFG BSL Mode...")
-    pi.set_mode(24, pigpio.OUTPUT)
-    pi.set_pull_up_down(24, pigpio.PUD_DOWN)
-    pi.write(24, 0)
+    if boot_cfg_pin is not None:
+        boot_cfg_pin.close()
+    boot_cfg_pin = DigitalOutputDevice(
+        BOOT_CFG_GPIO, active_high=True, initial_value=False
+    )
+
+
+def release_boot_cfg():
+    global boot_cfg_pin
+
+    if boot_cfg_pin is not None:
+        boot_cfg_pin.close()
+        boot_cfg_pin = None
 
 
 def upload_bsl(skip_prep=False):
-    if skip_prep == False:
+    if not skip_prep:
         prepare_upload_bsl()
     reset_ecu()
     time.sleep(0.1)
-    pi.set_mode(24, pigpio.INPUT)
-    pi.set_pull_up_down(24, pigpio.PUD_OFF)
+    release_boot_cfg()
 
     print("Sending BSL initialization message...")
     # send bootloader.bin to CAN BSL in Tricore
@@ -840,6 +887,34 @@ class BootloaderRepl(cmd.Cmd):
         "reset: reset ECU"
         reset_ecu()
 
+    def do_gpiotest(self, arg):
+        "gpiotest: slowly toggle RESET and BOOT_CFG for header-pin measurement"
+        global boot_cfg_pin
+
+        print(
+            f"Testing BCM GPIO{RESET_GPIO} RESET on physical pin 15: "
+            "high -> low -> high"
+        )
+        reset_pin.on()
+        time.sleep(1)
+        reset_pin.off()
+        time.sleep(1)
+        reset_pin.on()
+        time.sleep(1)
+
+        print(
+            f"Testing BCM GPIO{BOOT_CFG_GPIO} BOOT_CFG on physical pin 13: "
+            "low for 1s, then high-Z"
+        )
+        if boot_cfg_pin is not None:
+            boot_cfg_pin.close()
+        boot_cfg_pin = DigitalOutputDevice(
+            BOOT_CFG_GPIO, active_high=True, initial_value=False
+        )
+        time.sleep(1)
+        release_boot_cfg()
+        print("GPIO test complete.")
+
     def do_bye(self, arg):
         "Exit"
         return True
@@ -850,4 +925,10 @@ def parse(arg):
     return tuple(map(int, arg.split()))
 
 
-BootloaderRepl().cmdloop()
+if __name__ == "__main__":
+    try:
+        BootloaderRepl().cmdloop()
+    finally:
+        release_boot_cfg()
+        reset_pin.close()
+        bus.shutdown()

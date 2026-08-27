@@ -8,7 +8,8 @@ dependencies = [
     "python-can",
     "lz4",
     "tqdm",
-    "pigpio",
+    "gpiozero",
+    "lgpio; sys_platform == 'linux'",
     "udsoncan",
     "can-isotp",
 ]
