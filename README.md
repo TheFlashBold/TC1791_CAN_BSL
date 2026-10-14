@@ -110,25 +110,45 @@ Concatenating the PMU0 and PMU1 files will produce the "bench read" format prefe
 
 # Recovering a bricked Simos18 ECU:
 
-The BSL supports LZ4-compressed PFlash writes with the `compressed_write`
-command. The destination and length must be aligned to 256-byte flash pages,
-the range must stay within one PFlash bank, and every destination sector must
-be erased before writing. The BSL validates transfer sequencing, compressed and
-decompressed sizes, PFlash boundaries, and flash-controller errors.
+The BSL supports LZ4-compressed writes to both Program Flash and Data Flash
+(EEPROM) with the `compressed_write` command. The target array is selected
+automatically from the destination address:
 
-For example, after unlocking write protection and erasing every sector covered
-by the input image:
+| Array | Address range | Page size |
+|-------|---------------|-----------|
+| PFlash PMU0 | `0x80000000`–`0x801FFFFF` | 256 bytes |
+| PFlash PMU1 | `0x80800000`–`0x809FFFFF` | 256 bytes |
+| DFlash PMU0 | `0xAF000000`–`0xAF017FFF` | 128 bytes |
+| DFlash PMU1 | `0xAF080000`–`0xAF097FFF` | 128 bytes |
+
+The destination and length must be aligned to that array's page size, the range
+must stay within one bank, and every destination sector must be erased before
+writing. The BSL validates transfer sequencing, compressed and decompressed
+sizes, array boundaries, and flash-controller errors.
+
+Erase every sector covered by the input image first with `erase_sector`, which
+auto-selects `Erase Phys Sector` for DFlash addresses. The DFlash has two banks
+(DS0 at `0xAF000000`, DS1 at `0xAF080000`); each bank is a single `0x18000`
+sector that is erased completely by erasing its base address.
+
+For example, after unlocking write protection:
 
 ```
+(BSL) erase_sector 80800000            # ... repeat for each PFlash sector
 (BSL) compressed_write 80800000 100000 PMU1_PFlash.bin
+(BSL) erase_sector AF000000            # DFlash DS0 (whole 0x18000 bank)
+(BSL) compressed_write AF000000 18000 PMU0_DFlash.bin
+(BSL) erase_sector AF080000            # DFlash DS1 (whole 0x18000 bank)
+(BSL) compressed_write AF080000 18000 PMU1_DFlash.bin
 ```
 
-The wire protocol uses command `0x08`, transfers independent LZ4 blocks of at
-most 4096 uncompressed bytes, and writes each decoded block as 256-byte PFlash
-pages. The existing `write_file` command and all read commands remain
-compatible. Rebuild `Bootloader_2` and replace the root `bootloader.bin` before
-using this command; the upstream prebuilt binary does not implement command
-`0x08`.
+The wire protocol uses command `0x08` and transfers independent LZ4 blocks of at
+most 4096 uncompressed bytes. Each decoded block is written as 256-byte PFlash
+pages or 128-byte DFlash pages, the latter using the Data Flash `Enter Page
+Mode` variant (`0x5D`) with command cycles based at the addressed DFlash bank.
+The existing `write_file` command and all read commands remain compatible.
+Rebuild `Bootloader_2` and replace the root `bootloader.bin` before using this
+command; the upstream prebuilt binary does not implement command `0x08`.
 
 Build the BSL with a current bare-metal TriCore GCC toolchain:
 

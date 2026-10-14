@@ -11,6 +11,8 @@ from bsl_protocol import (
     build_compressed_write_start,
     iter_compressed_write_data_frames,
     parse_compressed_write_response,
+    resolve_write_page_size,
+    validate_dflash_range,
     validate_pflash_range,
 )
 
@@ -33,6 +35,39 @@ class CompressedWriteProtocolTests(unittest.TestCase):
                 ValueError
             ):
                 validate_pflash_range(address, length)
+
+    def test_page_size_is_resolved_from_the_target_array(self):
+        self.assertEqual(resolve_write_page_size(0x80000000, 0x200000), 256)
+        self.assertEqual(resolve_write_page_size(0x80800000, 0x100000), 256)
+        self.assertEqual(resolve_write_page_size(0xAF000000, 0x18000), 128)
+        self.assertEqual(resolve_write_page_size(0xAF080000, 0x18000), 128)
+        for address, length in (
+            (0xAF000001, 0x180),  # not 128-aligned
+            (0xAF000000, 0x18080),  # overruns the bank
+            (0xAF07FF80, 0x100),  # outside any bank
+            (0xAE000000, 0x100),  # not a flash array
+        ):
+            with self.subTest(address=address, length=length), self.assertRaises(
+                ValueError
+            ):
+                resolve_write_page_size(address, length)
+
+    def test_dflash_start_frame_and_range_validation(self):
+        self.assertEqual(
+            build_compressed_write_start(0xAF000000, 0x18000),
+            bytes.fromhex("08 af 00 00 00 01 80 00"),
+        )
+        validate_dflash_range(0xAF080000, 0x18000)
+        with self.assertRaises(ValueError):
+            validate_dflash_range(0xAF000040, 0x80)
+
+    def test_dflash_metadata_accepts_128_byte_pages(self):
+        self.assertEqual(
+            build_compressed_write_metadata(0x80, 0x40, 128),
+            bytes.fromhex("08 ff 00 80 00 40 00 00"),
+        )
+        with self.assertRaises(ValueError):
+            build_compressed_write_metadata(0x80, 0x40, 256)
 
     def test_metadata_contains_raw_and_compressed_lengths(self):
         self.assertEqual(

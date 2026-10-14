@@ -16,6 +16,17 @@
 #define ESR1_RESET          ((uword)0x00000002)
 #define POWERON_RESET       ((uword)0x00010000)
 
+/*
+ * TC1791 Data Flash (EEPROM) banks, non-cached, as read back with
+ * compressed_read. Each PMU exposes one DFlash window of DFLASH_BANK_SIZE.
+ */
+#define DFLASH0_BASE 0xAF000000U
+#define DFLASH1_BASE 0xAF080000U
+#define DFLASH_BANK_SIZE 0x18000U
+#define MAIN_IS_DFLASH_ADDRESS(addr) \
+	(((addr) >= DFLASH0_BASE && (addr) < (DFLASH0_BASE + DFLASH_BANK_SIZE)) \
+	|| ((addr) >= DFLASH1_BASE && (addr) < (DFLASH1_BASE + DFLASH_BANK_SIZE)))
+
 //****************************************************************************
 // @Global Variables
 //****************************************************************************
@@ -362,16 +373,33 @@ void MAIN_CMD_unlockPassword(CAN_SWObj *cur_msg) {
 /*
  * 0x5: eraseFlashSector
  * Uses bytes 1-4 to set the address to erase.
- * Erases the sector.
- * Returns the flash status register content.
+ * Erases the sector that contains the address. Program Flash sectors use the
+ * Erase Sector command; Data Flash (EEPROM) sectors use Erase Phys Sector,
+ * because the plain Erase Sector command is rejected for DFlash. The two
+ * DFlash banks are whole sectors erased completely: DS0 at 0xAF000000 and
+ * DS1 at 0xAF080000. Returns the flash status register content.
  */
 void MAIN_CMD_eraseFlashSector(CAN_SWObj *cur_msg) {
 	uword address = (cur_msg->ubData[1] << 24) | (cur_msg->ubData[2] << 16)
 			| (cur_msg->ubData[3] << 8) | cur_msg->ubData[4];
-	uword baseAddress = (address >= 0x80800000) ? 0x80800000 : 0x80000000;
-	uword whichController = (address >= 0x80800000);
-	volatile FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
-	FLASH_eraseSector(flashFSR, baseAddress, address);
+	ubyte isDFlash = MAIN_IS_DFLASH_ADDRESS(address);
+	/*
+	 * Command cycles use the DFlash bank base; PFlash uses its per-PMU bank
+	 * base. Both DFlash banks report in FLASH0_FSR (D0BUSY/D1BUSY), so DFlash
+	 * always uses FLASH0; PFlash uses its per-PMU register. Verified against
+	 * the Simos18 ASW flash driver (FUN_80881538, FUN_8088092c).
+	 */
+	uword baseAddress = isDFlash
+			? ((address >= DFLASH1_BASE) ? DFLASH1_BASE : DFLASH0_BASE)
+			: ((address >= 0x80800000U) ? 0x80800000U : 0x80000000U);
+	volatile FLASHn_FSR_t *flashFSR = isDFlash
+			? &FLASH0_FSR
+			: ((address >= 0x80800000U) ? &FLASH1_FSR : &FLASH0_FSR);
+	if (isDFlash) {
+		FLASH_erasePhysSector(flashFSR, baseAddress, address);
+	} else {
+		FLASH_eraseSector(flashFSR, baseAddress, address);
+	}
 	uword flashStatus = flashFSR->reg;
 	ubyte canData[8];
 	canData[0] = 0x5;
@@ -527,8 +555,10 @@ void MAIN_CMD_readCompressed(CAN_SWObj *cur_msg) {
 #define COMPRESSED_WRITE_ERR_FLASH 0x05
 #define COMPRESSED_WRITE_ERR_STATE 0x06
 
-/* FSR bits: OPER, SQER, PROER and PVER. */
+/* PFlash FSR error bits: PFOPER(8), SQER(10), PROER(11), PFSBER(12). */
 #define FLASH_STATUS_ERROR_MASK 0x00001D00U
+/* DFlash FSR error bits: DFOPER(9), SQER(10), PROER(11). */
+#define FLASH_STATUS_ERROR_MASK_DFLASH 0x00000E00U
 
 void MAIN_sendCompressedWriteResponse(ubyte stage, ubyte error, ubyte final,
 		uword flashStatus) {
@@ -550,32 +580,59 @@ void MAIN_abortCompressedWrite(ubyte stage, ubyte error, uword flashStatus) {
 	MAIN_sendCompressedWriteResponse(stage, error, 0, flashStatus);
 }
 
-ubyte MAIN_isValidPFlashRange(uword address, uword length) {
-	if ((address & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U || length == 0U
-			|| (length & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U) {
-		return 0;
+/*
+ * Returns the flash page size (256 for PFlash, 128 for DFlash/EEPROM) for a
+ * valid compressed-write range, or 0 if the range is not writable. The address
+ * and length must be aligned to the page size of the targeted array and the
+ * whole range must stay inside a single PFlash bank or DFlash bank.
+ */
+uword MAIN_compressedWritePageSize(uword address, uword length) {
+	if (length == 0U) {
+		return 0U;
 	}
-	if (address >= 0x80000000U && address < 0x80200000U) {
-		return length <= (0x80200000U - address);
+	/* Program Flash: 256-byte pages. */
+	if ((address & (COMPRESSED_WRITE_PFLASH_PAGE_SIZE - 1U)) == 0U
+			&& (length & (COMPRESSED_WRITE_PFLASH_PAGE_SIZE - 1U)) == 0U) {
+		if (address >= 0x80000000U && address < 0x80200000U
+				&& length <= (0x80200000U - address)) {
+			return COMPRESSED_WRITE_PFLASH_PAGE_SIZE;
+		}
+		if (address >= 0x80800000U && address < 0x80A00000U
+				&& length <= (0x80A00000U - address)) {
+			return COMPRESSED_WRITE_PFLASH_PAGE_SIZE;
+		}
 	}
-	if (address >= 0x80800000U && address < 0x80A00000U) {
-		return length <= (0x80A00000U - address);
+	/* Data Flash / EEPROM: 128-byte pages. */
+	if ((address & (COMPRESSED_WRITE_DFLASH_PAGE_SIZE - 1U)) == 0U
+			&& (length & (COMPRESSED_WRITE_DFLASH_PAGE_SIZE - 1U)) == 0U) {
+		if (address >= DFLASH0_BASE
+				&& address < (DFLASH0_BASE + DFLASH_BANK_SIZE)
+				&& length <= ((DFLASH0_BASE + DFLASH_BANK_SIZE) - address)) {
+			return COMPRESSED_WRITE_DFLASH_PAGE_SIZE;
+		}
+		if (address >= DFLASH1_BASE
+				&& address < (DFLASH1_BASE + DFLASH_BANK_SIZE)
+				&& length <= ((DFLASH1_BASE + DFLASH_BANK_SIZE) - address)) {
+			return COMPRESSED_WRITE_DFLASH_PAGE_SIZE;
+		}
 	}
-	return 0;
+	return 0U;
 }
 
 /*
- * 0x8: Begin an LZ4-compressed PFlash write.
+ * 0x8: Begin an LZ4-compressed flash write.
  * Bytes 1-4 contain the big-endian destination address and bytes 5-7 the
- * 24-bit uncompressed length. The complete range must be 256-byte aligned and
- * stay inside a single TC1791 PFlash bank. Flash must already be erased.
+ * 24-bit uncompressed length. The complete range must stay inside a single
+ * TC1791 PFlash bank (256-byte pages) or DFlash/EEPROM bank (128-byte pages),
+ * aligned to that array's page size. Flash must already be erased.
  */
 void MAIN_CMD_writeCompressedStart(CAN_SWObj *cur_msg) {
 	uword address = (cur_msg->ubData[1] << 24) | (cur_msg->ubData[2] << 16)
 			| (cur_msg->ubData[3] << 8) | cur_msg->ubData[4];
 	uword length = (cur_msg->ubData[5] << 16) | (cur_msg->ubData[6] << 8)
 			| cur_msg->ubData[7];
-	if (!MAIN_isValidPFlashRange(address, length)) {
+	uword pageSize = MAIN_compressedWritePageSize(address, length);
+	if (pageSize == 0U) {
 		MAIN_abortCompressedWrite(COMPRESSED_WRITE_READY,
 				COMPRESSED_WRITE_ERR_RANGE, 0);
 		return;
@@ -583,6 +640,7 @@ void MAIN_CMD_writeCompressedStart(CAN_SWObj *cur_msg) {
 	memset(&compressWriteState, 0x00, sizeof(struct compress_write_state));
 	compressWriteState.address = address;
 	compressWriteState.remaining = length;
+	compressWriteState.pageSize = pageSize;
 	boot.status = WAIT_COMPRESSED_WRITE_META;
 	MAIN_sendCompressedWriteResponse(COMPRESSED_WRITE_READY, 0, 0, 0);
 }
@@ -602,7 +660,7 @@ void MAIN_CMD_writeCompressedMeta(CAN_SWObj *cur_msg) {
 	rawLength = (cur_msg->ubData[2] << 8) | cur_msg->ubData[3];
 	compressedLength = (cur_msg->ubData[4] << 8) | cur_msg->ubData[5];
 	if (rawLength == 0U || rawLength > COMPRESSED_WRITE_BLOCK_SIZE
-			|| (rawLength & (COMPRESSED_WRITE_PAGE_SIZE - 1U)) != 0U
+			|| (rawLength & (compressWriteState.pageSize - 1U)) != 0U
 			|| rawLength > compressWriteState.remaining
 			|| compressedLength == 0U
 			|| compressedLength > COMPRESSED_WRITE_BUFFER_SIZE) {
@@ -621,10 +679,27 @@ void MAIN_CMD_writeCompressedMeta(CAN_SWObj *cur_msg) {
 void MAIN_CMD_finishCompressedWriteBlock(void) {
 	int decompressedLength;
 	uword pageOffset;
-	uword baseAddress = (compressWriteState.address >= 0x80800000U) ?
+	ubyte isDFlash = (compressWriteState.pageSize
+			== COMPRESSED_WRITE_DFLASH_PAGE_SIZE);
+	/*
+	 * PFlash uses the per-PMU status register (PMU0 below 0x80800000, PMU1
+	 * at-or-above). Both DFlash banks (DS0 at 0xAF000000, DS1 at 0xAF080000)
+	 * report in FLASH0_FSR via D0BUSY / D1BUSY, so DFlash always uses FLASH0.
+	 * Verified against the Simos18 ASW flash driver (FUN_8088092c, FUN_80881454).
+	 */
+	volatile FLASHn_FSR_t *flashFSR = isDFlash
+			? &FLASH0_FSR
+			: ((compressWriteState.address >= 0x80800000U) ? &FLASH1_FSR : &FLASH0_FSR);
+	uword pflashBase = (compressWriteState.address >= 0x80800000U) ?
 			0x80800000U : 0x80000000U;
-	uword whichController = (compressWriteState.address >= 0x80800000U);
-	volatile FLASHn_FSR_t *flashFSR = (whichController > 0) ? &FLASH1_FSR : &FLASH0_FSR;
+	/*
+	 * Command cycles use the DFlash bank base; the bank is selected by this
+	 * base, not by A16 within it. Matches the ASW base resolver at 0x80881538.
+	 */
+	uword dflashBase = (compressWriteState.address >= DFLASH1_BASE) ?
+			DFLASH1_BASE : DFLASH0_BASE;
+	uword errorMask = isDFlash ?
+			FLASH_STATUS_ERROR_MASK_DFLASH : FLASH_STATUS_ERROR_MASK;
 	uword flashStatus;
 	ubyte final;
 
@@ -639,12 +714,17 @@ void MAIN_CMD_finishCompressedWriteBlock(void) {
 	}
 
 	for (pageOffset = 0; pageOffset < compressWriteState.rawLength;
-			pageOffset += COMPRESSED_WRITE_PAGE_SIZE) {
-		FLASH_writePage(flashFSR, baseAddress,
-				compressWriteState.address + pageOffset,
-				&compressWriteState.decompressedBuffer[pageOffset]);
+			pageOffset += compressWriteState.pageSize) {
+		uword pageAddress = compressWriteState.address + pageOffset;
+		if (isDFlash) {
+			FLASH_writePageDFlash(flashFSR, dflashBase, pageAddress,
+					&compressWriteState.decompressedBuffer[pageOffset]);
+		} else {
+			FLASH_writePage(flashFSR, pflashBase, pageAddress,
+					&compressWriteState.decompressedBuffer[pageOffset]);
+		}
 		flashStatus = flashFSR->reg;
-		if ((flashStatus & FLASH_STATUS_ERROR_MASK) != 0U) {
+		if ((flashStatus & errorMask) != 0U) {
 			MAIN_abortCompressedWrite(COMPRESSED_WRITE_BLOCK_DONE,
 					COMPRESSED_WRITE_ERR_FLASH, flashStatus);
 			return;

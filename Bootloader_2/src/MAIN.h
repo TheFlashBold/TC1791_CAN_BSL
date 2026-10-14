@@ -270,6 +270,8 @@ struct compress_read_state {
 };
 
 #define COMPRESSED_WRITE_PAGE_SIZE 256U
+#define COMPRESSED_WRITE_PFLASH_PAGE_SIZE 256U
+#define COMPRESSED_WRITE_DFLASH_PAGE_SIZE 128U
 #define COMPRESSED_WRITE_BLOCK_SIZE 4096U
 #define COMPRESSED_WRITE_BUFFER_SIZE (COMPRESSED_WRITE_BLOCK_SIZE + (COMPRESSED_WRITE_BLOCK_SIZE / 255U) + 16U)
 
@@ -279,6 +281,7 @@ struct compress_write_state {
 	uword rawLength;
 	uword compressedLength;
 	uword compressedCursor;
+	uword pageSize;
 	ubyte expectedSequence;
 	ubyte compressedBuffer[COMPRESSED_WRITE_BUFFER_SIZE];
 	ubyte decompressedBuffer[COMPRESSED_WRITE_BLOCK_SIZE];

@@ -24,6 +24,7 @@ from bsl_protocol import (
     build_compressed_write_start,
     iter_compressed_write_data_frames,
     parse_compressed_write_response,
+    resolve_write_page_size,
 )
 
 TWISTER_PATH = "../Simos18_SBOOT/twister"  # This is the path to the "twister" binary from https://github.com/bri3d/Simos18_SBOOT
@@ -705,6 +706,7 @@ def wait_compressed_write_response(expected_stage, timeout=10.0):
 def write_compressed_file(address, size, filename):
     address_int = int.from_bytes(address, "big")
     size_int = int.from_bytes(size, "big")
+    page_size = resolve_write_page_size(address_int, size_int)
     start_frame = build_compressed_write_start(address_int, size_int)
 
     with open(filename, "rb") as input_file:
@@ -730,7 +732,7 @@ def write_compressed_file(address, size, filename):
             raw_block = input_data[offset : offset + WRITE_BLOCK_SIZE]
             compressed = lz4.block.compress(raw_block, store_size=False)
             metadata = build_compressed_write_metadata(
-                len(raw_block), len(compressed)
+                len(raw_block), len(compressed), page_size
             )
             bus.send(
                 Message(
@@ -846,7 +848,7 @@ class BootloaderRepl(cmd.Cmd):
         send_passwords(pw1, pw2, read_write=0x05, ucb=1)
 
     def do_erase_sector(self, arg):
-        "erase_sector <addr> : Erase sector beginning with address"
+        "erase_sector <addr> : Erase the PFlash or DFlash sector beginning with address (DFlash uses Erase Phys Sector)"
         byte_specifier = bytearray.fromhex(arg)
         erase_sector(byte_specifier)
 
@@ -871,7 +873,7 @@ class BootloaderRepl(cmd.Cmd):
         write_file(byte_specifier, length_specifier, filename)
 
     def do_compressed_write(self, arg):
-        "compressed_write <addr> <length> <filename>: write page-aligned, pre-erased PFlash using LZ4 compression"
+        "compressed_write <addr> <length> <filename>: write page-aligned, pre-erased PFlash (256B pages) or DFlash/EEPROM (128B pages) using LZ4 compression"
         args = arg.split()
         if len(args) != 3:
             print("usage: compressed_write <addr> <length> <filename>")

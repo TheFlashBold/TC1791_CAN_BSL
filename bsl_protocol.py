@@ -9,12 +9,22 @@ WRITE_BLOCK_READY = 0xA1
 WRITE_BLOCK_DONE = 0xA2
 
 WRITE_PAGE_SIZE = 256
+PFLASH_PAGE_SIZE = 256
+DFLASH_PAGE_SIZE = 128
 WRITE_BLOCK_SIZE = 4096
 WRITE_COMPRESSED_BOUND = WRITE_BLOCK_SIZE + (WRITE_BLOCK_SIZE // 255) + 16
 
 PFLASH_RANGES = (
     (0x80000000, 0x80200000),
     (0x80800000, 0x80A00000),
+)
+
+# TC1791 Data Flash (EEPROM) banks, non-cached, as read back with
+# compressed_read (one 0x18000-byte window per PMU).
+DFLASH_BANK_SIZE = 0x18000
+DFLASH_RANGES = (
+    (0xAF000000, 0xAF000000 + DFLASH_BANK_SIZE),
+    (0xAF080000, 0xAF080000 + DFLASH_BANK_SIZE),
 )
 
 WRITE_ERRORS = {
@@ -32,7 +42,7 @@ class CompressedWriteProtocolError(RuntimeError):
 
 
 def validate_pflash_range(address: int, length: int) -> None:
-    if address % WRITE_PAGE_SIZE or length <= 0 or length % WRITE_PAGE_SIZE:
+    if address % PFLASH_PAGE_SIZE or length <= 0 or length % PFLASH_PAGE_SIZE:
         raise ValueError("address and length must be aligned to 256-byte pages")
     if length > 0xFFFFFF:
         raise ValueError("length exceeds the 24-bit protocol field")
@@ -40,20 +50,51 @@ def validate_pflash_range(address: int, length: int) -> None:
         raise ValueError("write range must stay inside one TC1791 PFlash bank")
 
 
+def validate_dflash_range(address: int, length: int) -> None:
+    if address % DFLASH_PAGE_SIZE or length <= 0 or length % DFLASH_PAGE_SIZE:
+        raise ValueError("address and length must be aligned to 128-byte pages")
+    if length > 0xFFFFFF:
+        raise ValueError("length exceeds the 24-bit protocol field")
+    if not any(start <= address and length <= end - address for start, end in DFLASH_RANGES):
+        raise ValueError("write range must stay inside one TC1791 DFlash bank")
+
+
+def resolve_write_page_size(address: int, length: int) -> int:
+    """Return the flash page size (256 PFlash, 128 DFlash) for a writable range.
+
+    Mirrors the target's MAIN_compressedWritePageSize(): the range selects the
+    target array by its address, and must be aligned to and contained within a
+    single bank of that array.
+    """
+    if any(start <= address < end for start, end in PFLASH_RANGES):
+        validate_pflash_range(address, length)
+        return PFLASH_PAGE_SIZE
+    if any(start <= address < end for start, end in DFLASH_RANGES):
+        validate_dflash_range(address, length)
+        return DFLASH_PAGE_SIZE
+    raise ValueError(
+        "write range must stay inside one TC1791 PFlash or DFlash bank"
+    )
+
+
 def build_compressed_write_start(address: int, length: int) -> bytes:
-    validate_pflash_range(address, length)
+    resolve_write_page_size(address, length)
     return bytes([WRITE_COMPRESSED]) + address.to_bytes(4, "big") + length.to_bytes(
         3, "big"
     )
 
 
-def build_compressed_write_metadata(raw_length: int, compressed_length: int) -> bytes:
+def build_compressed_write_metadata(
+    raw_length: int, compressed_length: int, page_size: int = WRITE_PAGE_SIZE
+) -> bytes:
     if (
         raw_length <= 0
         or raw_length > WRITE_BLOCK_SIZE
-        or raw_length % WRITE_PAGE_SIZE
+        or raw_length % page_size
     ):
-        raise ValueError("raw block length must be a page-aligned value up to 4096")
+        raise ValueError(
+            f"raw block length must be a {page_size}-byte-aligned value up to 4096"
+        )
     if compressed_length <= 0 or compressed_length > WRITE_COMPRESSED_BOUND:
         raise ValueError("compressed block exceeds the target buffer")
     return bytes(
